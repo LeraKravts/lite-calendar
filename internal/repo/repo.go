@@ -1,58 +1,69 @@
 package repo
 
 import (
-	"sync"
+	"context"
+	"fmt"
+	"time"
 
-	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/lerakravts/lite-calendar/internal/model"
 )
 
 // struct будет инициализирована всего 1 экз
 type Repository struct {
-	mu     sync.RWMutex
-	events map[uuid.UUID]model.Event
+	db *sqlx.DB
 }
 
 // конструтктор хранилица
-func NewRepository() *Repository {
-	return &Repository{
-		events: make(map[uuid.UUID]model.Event),
-	}
+func NewRepository(db *sqlx.DB) *Repository {
+	return &Repository{db: db}
 }
 
-// пока ошибку не обрабатываем, тк у нас in-memory map — она не падает и не возвращает ошибки
-func (r *Repository) Create(event model.Event) (uuid.UUID, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *Repository) CreateEvent(ctx context.Context, event *model.Event) error {
+	query := `
+		INSERT INTO events (
+			id, title, user_id, start_time, end_time,
+			notify_before, notification_sent_at, created_at
+		) VALUES (
+			:id, :title, :user_id, :start_time, :end_time,
+			:notify_before, :notification_sent_at, :created_at
+		);
+	`
 
-	id := uuid.New()
-	r.events[id] = event
-	return id, nil
+	_, err := r.db.NamedExecContext(ctx, query, event)
+	return err
 }
 
-/*
-можно вернуть ошибку, если id не найден
+func (r *Repository) ListEvents(ctx context.Context, from, to time.Time) ([]model.Event, error) {
+	query := `SELECT id, title, user_id, start_time, end_time,
+                     notify_before, notification_sent_at, created_at
+              FROM events
+              WHERE start_time < $1 AND end_time > $2
+              ORDER BY start_time`
 
-	if _, ok := r.events[id]; !ok {
-		return fmt.Errorf("event with ID %s not found", id)
+	var events []model.Event
+	err := r.db.SelectContext(ctx, &events, query, to, from)
+	if err != nil {
+		return nil, fmt.Errorf("list events: %w", err)
 	}
-*/
-func (r *Repository) Delete(id uuid.UUID) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	delete(r.events, id)
-
+	return events, nil
 }
 
-func (r *Repository) List() map[uuid.UUID]model.Event {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func (r *Repository) DeleteEvent(ctx context.Context, id string) error {
+	query := `DELETE FROM events WHERE id = $1`
 
-	result := make(map[uuid.UUID]model.Event)
-	for k, v := range r.events {
-		result[k] = v
+	res, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete event: %w", err)
 	}
-	return result
 
+	//если события не было
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("event not found")
+	}
+	return nil
 }

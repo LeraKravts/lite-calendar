@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lerakravts/lite-calendar/internal/model"
 	"github.com/lerakravts/lite-calendar/internal/service"
 )
 
@@ -19,30 +20,17 @@ func NewHandler(s *service.Service) *Handler {
 }
 
 type createEventRequest struct {
-	Title string    `json:"title"`
-	Time  time.Time `json:"time"`
+	Title        string    `json:"title"`
+	UserID       string    `json:"user_id"`
+	StartTime    time.Time `json:"start_time"`
+	EndTime      time.Time `json:"end_time"`
+	NotifyBefore *string   `json:"notify_before,omitempty"` // например: "10 minutes"
 }
 
-func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
-	events := h.service.ListEvents()
-
-	//устновим заголовок ответа - Говорим клиенту: «Ответ будет в формате JSON»
-	w.Header().Add("Content-Type", "application/json")
-
-	//преобразуем events (map[uuid.UUID]Event) в JSON
-	err := json.NewEncoder(w).Encode(events)
-	if err != nil {
-		http.Error(w, "failed to encode events", http.StatusInternalServerError)
-		return
-	}
-}
-
-// можно оставить в CreateEvent проверку метода "на всякий случай",
-// но это уже защита от дурака, тк проверяем в switch
 func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 
-	//1. проверка метода в mux.HandleFunc
-	//2. Парсим JSON из тела запроса
+	// Шаг 1: распарсить JSON-запрос
 	var req createEventRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -50,37 +38,98 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//3. Создаем событие через Service
-	id, err := h.service.CreateEvent(req.Title, req.Time)
+	// Шаг 2: собрать Event (мы знаем, что ID и CreatedAt — наша ответственность)
+	event := model.Event{
+		ID:                 uuid.New().String(),
+		Title:              req.Title,
+		UserID:             req.UserID,
+		StartTime:          req.StartTime,
+		EndTime:            req.EndTime,
+		NotifyBefore:       req.NotifyBefore,
+		NotificationSentAt: nil,
+		CreatedAt:          time.Now().UTC(),
+	}
+
+	// Шаг 3: передать в сервис
+	err = h.service.CreateEvent(ctx, event)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to create event", http.StatusInternalServerError)
 		return
 	}
 
-	//4. Возвращаем JSON с id
+	// Шаг 4: вернуть клиенту ID созданного события
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-
 	json.NewEncoder(w).Encode(map[string]string{
-		"id": id.String(),
+		"id": event.ID,
 	})
+}
+func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 
+	// 1. Читаем параметры from и to из query
+	fromStr := r.URL.Query().Get("from")
+	toStr := r.URL.Query().Get("to")
+
+	var from, to time.Time
+	var err error
+
+	// 2. Парсим from (если есть), иначе дефолт = сейчас - 1 день
+	if fromStr != "" {
+		from, err = time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			http.Error(w, "invalid 'from' param", http.StatusBadRequest)
+			return
+		}
+	} else {
+		from = time.Now().Add(-24 * time.Hour)
+	}
+
+	// 3. Парсим to (если есть), иначе дефолт = сейчас + 7 дней
+	if toStr != "" {
+		to, err = time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			http.Error(w, "invalid 'to' param", http.StatusBadRequest)
+			return
+		}
+	} else {
+		to = time.Now().Add(7 * 24 * time.Hour)
+	}
+
+	// 4. Защита от "перепутанных дат"
+	if to.Before(from) {
+		http.Error(w, "'to' must be after 'from'", http.StatusBadRequest)
+		return
+	}
+
+	// 5. Получаем события через сервис
+	events, err := h.service.ListEvents(ctx, from, to)
+	if err != nil {
+		http.Error(w, "failed to get events", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Возвращаем JSON
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(events)
 }
 
 func (h *Handler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 
-	//1.Получаем id из URL-пути: /events/{id}
 	idStr := strings.TrimPrefix(r.URL.Path, "/events/")
-
-	//2. парсим в uuid.UUID
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		http.Error(w, "invalid UUID format", http.StatusBadRequest)
 		return
 	}
-	//3. удаляем через сервис
-	h.service.DeleteEvent(id)
 
-	//4. Возвращаем 204 No Content — всё прошло успешно, но ничего не возвращаем
+	err = h.service.DeleteEvent(ctx, id.String())
+	if err != nil {
+		http.Error(w, "failed to delete", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

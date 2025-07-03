@@ -1,11 +1,11 @@
 package service
 
 import (
-	"errors"
+	"context"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/lerakravts/lite-calendar/internal/model"
 	"github.com/lerakravts/lite-calendar/internal/repo"
 )
@@ -15,32 +15,49 @@ type Service struct {
 	repo *repo.Repository
 }
 
-func NewService(r *repo.Repository) *Service {
-	return &Service{repo: r}
+func NewService(repo *repo.Repository) *Service {
+	return &Service{repo: repo}
 }
 
-// пока ctx не прокидываем
-// Здесь CreateEvent ничего не добавляет — просто проксирует результат repo.Create.
-func (s *Service) CreateEvent(title string, eventTime time.Time) (uuid.UUID, error) {
-	if strings.TrimSpace(title) == "" {
-		return uuid.Nil, errors.New("title can't be empty")
-	}
-	if eventTime.Before(time.Now()) {
-		return uuid.Nil, errors.New("event time can't be in the past")
+func (s *Service) CreateEvent(ctx context.Context, event model.Event) error {
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
-	event := model.Event{
-		Title: title,
-		Time:  eventTime,
+	// 1. Проверка: заголовок не пустой
+	if strings.TrimSpace(event.Title) == "" {
+		return fmt.Errorf("title cannot be empty")
 	}
 
-	return s.repo.Create(event)
+	// 2. Проверка: время старта и окончания
+	if event.EndTime.Before(event.StartTime) {
+		return fmt.Errorf("end time must be after start time")
+	}
+
+	// 3. (опционально) — длина заголовка
+	if len(event.Title) > 255 {
+		return fmt.Errorf("title too long")
+	}
+	return s.repo.CreateEvent(ctx, &event)
 }
 
-func (s *Service) DeleteEvent(id uuid.UUID) {
-	s.repo.Delete(id)
+func (s *Service) ListEvents(ctx context.Context, from, to time.Time) ([]model.Event, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return s.repo.ListEvents(ctx, from, to)
 }
+func (s *Service) DeleteEvent(ctx context.Context, id string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
-func (s *Service) ListEvents() map[uuid.UUID]model.Event {
-	return s.repo.List()
+	return s.repo.DeleteEvent(ctx, id)
 }

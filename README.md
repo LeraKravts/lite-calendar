@@ -1,8 +1,8 @@
 #  lite-calendar
 
+---
 A lightweight calendar backend built in Go — fast, modular, containerized. Designed for clarity, testability, and extensibility (Kafka, workers, CI/CD).
 Clean layered architecture: `handler → service → repository`
----
 
 ##  Tech Stack
 
